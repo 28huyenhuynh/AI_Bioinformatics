@@ -1,0 +1,9 @@
+Anatomical sanity check (population mean):
+  wrist flexion   ch9(FDS)=0.472  ch10(EDS)=0.238
+  wrist extension ch9(FDS)=0.160  ch10(EDS)=0.602
+
+LOSO macro-F1 with all channels (LDA): 0.3845
+Spearman(channel variability CV, channel importance drop) = -0.661 (p=0.038, n=10 channels)
+Smallest subset within 95% of best F1: 6 channels (ch1,ch2,ch4,ch6,ch7,ch10) F1=0.3827
+
+Spearman(subject atypicality, LOSO macro-F1 of RF) = -0.400 (p=0.0384, n=27)

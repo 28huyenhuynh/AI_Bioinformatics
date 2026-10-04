@@ -1,1 +1,8 @@
 outputs/
+cache/
+logs/
+__pycache__/
+*.pyc
+results/simulator/*.joblib
+.venv/
+.ipynb_checkpoints/

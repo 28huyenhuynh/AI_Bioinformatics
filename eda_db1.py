@@ -9,7 +9,7 @@ from scipy.io import loadmat
 # CONFIG 
 # ---------------------------------------------------------------------------
 DATA_DIR = "data/db1"          # root folder 
-SUBJECT_TO_INSPECT = "S1"      # which subject to use for detailed plots
+SUBJECT_TO_INSPECT = "s1"      # subject folder name (folders are lowercase: s1..s27)
 EXERCISE_TO_INSPECT = "E1"     # which exercise file to use for detailed plots
 OUTPUT_DIR = "outputs"
 FIG_DIR = os.path.join(OUTPUT_DIR, "figures")
@@ -23,8 +23,7 @@ os.makedirs(FIG_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 def inventory_dataset(data_dir):
     """Scan data_dir and report which subjects/exercises are present."""
-    pattern = os.path.join(data_dir, "S*", "*.mat")
-    files = sorted(glob.glob(pattern))
+    files = sorted(glob.glob(os.path.join(data_dir, "[sS]*", "*.mat")))
 
     if not files:
         print(f"[!] No .mat files found under '{data_dir}'.")
@@ -42,7 +41,7 @@ def inventory_dataset(data_dir):
 # ---------------------------------------------------------------------------
 def load_subject_exercise(data_dir, subject, exercise):
     """Load a single subject/exercise .mat file into a dict of arrays."""
-    matches = glob.glob(os.path.join(data_dir, subject, f"{subject}_*_{exercise}.mat"))
+    matches = glob.glob(os.path.join(data_dir, subject, f"*_{exercise}.mat"))
     if not matches:
         raise FileNotFoundError(
             f"No file found for subject={subject}, exercise={exercise} under {data_dir}. "
@@ -92,6 +91,8 @@ def summarize_signal(d, report_lines):
 # 4. PLOTS
 # ---------------------------------------------------------------------------
 def plot_class_distribution(class_df, out_path):
+    """Labels here are LOCAL to one exercise file (1..12/17/23). Use
+    semg.data.load_subject for global 0..52 labels."""
     plt.figure(figsize=(10, 4))
     plt.bar(class_df["label"].astype(str), class_df["n_samples"])
     plt.xlabel("Movement label (0 = rest)")

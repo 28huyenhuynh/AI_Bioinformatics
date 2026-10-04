@@ -1,0 +1,9 @@
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
+pandas>=2.0
+matplotlib>=3.7
+joblib>=1.3
+pillow>=9.0      # saving simulator GIFs
+torch>=2.1       # deep models only (CNN1D, LSTM, CNNLSTM, CNN2D)
+pytest>=7.0      # optional, for tests/
