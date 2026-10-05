@@ -14,7 +14,7 @@ for sEMG gesture classification on **NinaPro DB1**, with a focus on **cross-subj
 python -m venv .venv
 # Windows: .venv\Scripts\activate      macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
-python tests/test_pipeline.py        # 7 quick checks, no data needed
+python tests/test_pipeline.py        # 11 quick checks, no data needed
 ```
 
 Data layout (already in this repo):
@@ -41,7 +41,6 @@ semg/                  reusable library
   bioinfo.py           activation profiles, variability, channel importance, elimination
   plots.py             all report figures
   sota.py              published deep models + their own paper recipes (Hartwell 2020, Hu 2018)
-eda_db1.py             exploratory look at one file
 run_within_subject.py  STEP 1  reproduction (NinaPro standard repetition split)
 run_sota.py            STEP 1b reproduction of published deep models (GPU; see notebooks/sota_colab.ipynb)
 run_loso.py            STEP 2  leave-one-subject-out (main study)
@@ -50,7 +49,18 @@ run_bioinformatics.py  STEP 4  muscle-channel analysis
 run_robustness.py      STEP 5  degradation curves
 simulator.py           STEP 6  interactive replay GUI
 tests/                 sanity tests for the pipeline rules
+slurm/                 job scripts for the FUV AI GPU cluster
 ```
+
+**Superseded first-pass scripts (September 2026).** Kept for the record; use the pipeline above instead.
+
+| Script | Wrote to | Replaced by |
+|---|---|---|
+| `eda_db1.py` | `outputs/eda_db1_summary.txt`, `outputs/figures/` | `semg/data.py` + `run_bioinformatics.py` |
+| `preprocess_db1.py` | `outputs/db1_preprocessed.npz` (deleted; rerun to rebuild) | `semg/data.py` (windows built from the `.mat` files directly) |
+| `ml_baselines.py` | `outputs/ml_baselines_summary.txt`, confusion matrices in `outputs/figures/` | `run_within_subject.py`, `run_loso.py` |
+
+`outputs/` is git-ignored and holds only those early figures and summaries. All current results go to `results/`.
 
 ## 3. Step by step
 
@@ -58,14 +68,14 @@ Every script prints progress, writes a `per_subject.csv` + figures under `result
 
 ### Step 1 — Reproduce published work (within-subject)
 Train one model per subject on repetitions 1,3,4,6,8,9,10, test on 2,5,7 — the protocol of
-Atzori et al. (2014). Compare your mean accuracy with the numbers in that paper's results table.
+Atzori et al. (2014). Compare our mean accuracy with the numbers in that paper's results table.
 
 ```bash
 python run_within_subject.py --gestures all --models LDA,kNN5,SVM,RF          # ~20 min on a laptop
 python run_within_subject.py --gestures all --models CNN2D,CNN1D --verbose     # deep reproduction
 ```
 Output: `results/within_subject_all/` (summary.csv, per-subject bars, confusion matrices).
-If your numbers are far from the paper, check window length/step and feature set before changing models.
+If our numbers are far from the paper, check window length/step and feature set before changing models.
 `semg/deep.py::CNN2D` is a starting point for reproducing Atzori et al. (2016) — compare its layers with
 that paper's architecture figure and adjust.
 
@@ -83,7 +93,14 @@ python run_sota.py --paper hartwell --subjects 1 --splits 1     # one fold (~80 
 python run_sota.py --paper hartwell                             # full protocol: use a GPU
 python run_sota.py --paper hu
 ```
-Full runs need a GPU: open `notebooks/sota_colab.ipynb` in Google Colab. Finished folds are saved to
+Full runs need a GPU. (connect NetBird; conda env `semg`):
+```bash
+mkdir -p logs
+sbatch --array=1-27%1 slurm/sota.sbatch hartwell     # one subject per task
+sbatch --array=1-27%1 slurm/sota.sbatch hu
+squeue -u $USER; tail -f logs/sota_<jobid>_<task>.out
+```
+Without the cluster, open `notebooks/sota_colab.ipynb` in Google Colab. Finished folds are saved to
 `results/sota_<paper>/folds/` and skipped on re-run, so a disconnected session simply resumes.
 Settings a paper does not report (e.g. Hu et al. give no optimizer, learning rate or epochs) are listed
 in `semg/sota.py::ASSUMPTIONS` and printed at the start of every run: state them in the report.
@@ -142,7 +159,7 @@ python simulator.py --subject 5 --model RF --save results/simulator/demo.gif --f
 The model is trained without the replayed subject, so the demo behaves like fitting a prosthesis to a new user.
 Running accuracy in the simulator is dominated by rest periods, so report LOSO numbers, not this one.
 
-## 4. Methodological decisions (put these in your Methods section)
+## 4. Methodological decisions
 
 1. **No 20–450 Hz bandpass.** DB1 is sampled at 100 Hz (Nyquist 50 Hz) and its Otto Bock electrodes already output a rectified RMS envelope. For raw-EMG filtering use NinaPro DB2 (2 kHz).
 2. **Global labels.** Each exercise file restarts labels at 1; offsets +0/+12/+29 give unique labels 1–52.
@@ -160,6 +177,29 @@ Running accuracy in the simulator is dominated by rest periods, so report LOSO n
 * Try a 1-fold run first: `python run_loso.py --models CNN1D --test-subjects 1 --verbose`.
 
 ## 6. References
-* Atzori et al. (2014) NinaPro DB1. *Scientific Data* 1:140053.
-* Atzori, Cognolato & Müller (2016) Deep learning with CNNs applied to EMG data. *Frontiers in Neurorobotics* 10:9.
-* Pereira et al. (2024) Tackling electrode shift with HD-EMG electrode subsets. ICASSP 2024.
+Dataset and baselines
+* Atzori, M. et al. (2014). Electromyography data for non-invasive naturally-controlled robotic hand
+  prostheses. *Scientific Data* 1, 140053. doi:10.1038/sdata.2014.53
+* Atzori, M., Cognolato, M. & Müller, H. (2016). Deep learning with convolutional neural networks applied to
+  electromyography data: a resource for the classification of movements for prosthetic hands.
+  *Frontiers in Neurorobotics* 10, 9. doi:10.3389/fnbot.2016.00009
+
+Reproduced deep models (`run_sota.py`)
+* Hartwell, A., Kadirkamanathan, V. & Anderson, S. R. (2020). A temporal-to-spatial deep convolutional neural
+  network for classification of hand movements from multichannel electromyography data. arXiv:2007.10879.
+* Hu, Y., Wong, Y., Wei, W., Du, Y., Kankanhalli, M. & Geng, W. (2018). A novel attention-based hybrid CNN-RNN
+  architecture for sEMG-based gesture recognition. *PLoS ONE* 13(10), e0206049. doi:10.1371/journal.pone.0206049
+* Geng, W., Du, Y., Jin, W., Wei, W., Hu, Y. & Li, J. (2016). Gesture recognition by instantaneous surface EMG
+  images. *Scientific Reports* 6, 36571. doi:10.1038/srep36571 — source of the training recipe used where
+  Hu et al. report none.
+
+Other DB1 state of the art discussed
+* Wei, W., Dai, Q., Wong, Y., Hu, Y., Kankanhalli, M. & Geng, W. (2019). Surface-electromyography-based gesture
+  recognition by multi-view deep learning. *IEEE Transactions on Biomedical Engineering* 66(10), 2964–2973.
+  doi:10.1109/TBME.2019.2899222
+* Xia, Y., Qiu, D., Zhang, C. & Liu, J. (2025). sEMG-based gesture recognition using multi-stream adaptive CNNs
+  with integrated residual modules. *Frontiers in Bioengineering and Biotechnology* 13, 1487020.
+  doi:10.3389/fbioe.2025.1487020 — 98.24 % on DB1 under a random window split (see leakage note in the report).
+
+Robustness
+* Pereira et al. (2024). Tackling electrode shift with HD-EMG electrode subsets. ICASSP 2024.

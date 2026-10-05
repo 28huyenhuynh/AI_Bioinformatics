@@ -82,8 +82,8 @@ ASSUMPTIONS = {
         "Only the raw-image1 input is reproduced; feature-signal-image1 (87.0%) is not "
         "specified well enough (feature list and 51-row layout missing).",
         "Optimizer, learning rate, schedule, batch size and epochs not reported: GengNet's "
-        "recipe used (SGD momentum 0.9, lr 0.1, x0.1 at epochs 16 and 24, 28 epochs, batch "
-        "1000, weight decay 1e-4).",
+        "recipe used (Geng et al. 2016: SGD, lr 0.1 divided by 10 after epochs 16 and 24, "
+        "28 epochs, batch 1000, weight decay 1e-4). GengNet gives no momentum value: 0.9 assumed.",
         "Loss weights alpha, beta (Eq. 4) not reported: both 1; lambda = weight decay 1e-4.",
         "Number of subsegments for Table 4 not stated: 5 (non-overlapping, 4 frames each); "
         "Fig. 4 at 5 subsegments matches the Table 4 raw-image1 value of 84.8%.",
@@ -286,28 +286,31 @@ def train(name, Xtr, ytr, n_classes, recipe, seed=C.SEED, verbose=True):
         # Keras class_weight: per-sample loss scaled by its class weight, averaged over the batch
         return (ce(net(xb), yb) * cw[yb]).mean()
 
+    # whole training set lives on the device: with batch 32 the per-batch
+    # host->GPU copies would otherwise dominate (~200 MB, fits easily)
+    X_all = torch.from_numpy(np.ascontiguousarray(Xtr, dtype=np.float32)).to(device)
+    y_all = torch.from_numpy(ytr.astype(np.int64)).to(device)
     rng = np.random.default_rng(seed)
     bs = recipe["batch_size"]
     for epoch in range(1, recipe["epochs"] + 1):
         t0 = time.time()
         net.train()
-        order = rng.permutation(len(ytr))
+        order = torch.from_numpy(rng.permutation(len(ytr))).to(device)
         total = 0.0
         for i in range(0, len(order), bs):
-            idx = np.sort(order[i:i + bs])
+            idx = order[i:i + bs]
             if len(idx) < 2 and is_hu:  # BatchNorm needs > 1 sample
                 continue
-            xb = torch.from_numpy(Xtr[idx]).to(device)
-            yb = torch.from_numpy(ytr[idx].astype(np.int64)).to(device)
+            xb, yb = X_all[idx], y_all[idx]
             opt.zero_grad()
             loss = loss_fn(xb, yb)
             loss.backward()
             opt.step()
-            total += loss.item() * len(idx)
+            total += loss.detach() * len(idx)  # no .item(): avoids a GPU sync every batch
         if sched:
             sched.step()
         if verbose:
-            print(f"      epoch {epoch:>2}/{recipe['epochs']}  loss {total / len(ytr):.4f}"
+            print(f"      epoch {epoch:>2}/{recipe['epochs']}  loss {float(total) / len(ytr):.4f}"
                   f"  ({time.time() - t0:.0f}s)", flush=True)
     return net
 
