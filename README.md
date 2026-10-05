@@ -87,6 +87,7 @@ numbers compare directly with the paper:
 |---|---|---|---|
 | `hartwell` | TtS CNN (754,933 params, Table I), Baseline CNN (Table III) | 150 ms windows, 10 ms step, 53 classes, 10 repetition splits, Adam 1e-3, 10 epochs | TtS macro-avg accuracy 66.6 ± 5.1 %, Baseline 65.0 ± 5.1 % |
 | `hu` | Attention CNN-RNN, raw-image1 input | 200 ms windows, 52 movements, NinaPro split | 84.8 % per window, 96.5 % per trial (majority vote) |
+| `jiang` | RIE: Inception + efficient channel attention (0.89 M params, matches paper) | 300 ms windows / 50 ms step, sym4 denoising, 52 movements, NinaPro split, Adam + cosine, 150 epochs | 88.27 % (current DB1 state of the art under the repetition split) |
 
 ```bash
 python run_sota.py --paper hartwell --subjects 1 --splits 1     # one fold (~80 min on a laptop CPU)
@@ -202,4 +203,6 @@ Other DB1 state of the art discussed
   doi:10.3389/fbioe.2025.1487020 — 98.24 % on DB1 under a random window split (see leakage note in the report).
 
 Robustness
-* Pereira et al. (2024). Tackling electrode shift with HD-EMG electrode subsets. ICASSP 2024.
+* Pereira, J., Halatsis, D., Hodossy, B. & Farina, D. (2024). Tackling electrode shift in gesture recognition
+  with HD-EMG electrode subsets. *ICASSP 2024*. doi:10.1109/ICASSP48485.2024.10448329 (arXiv:2401.02773) —
+  needs a high-density grid, so on DB1 only its idea is used (ring-rotation augmentation, `--augment`).

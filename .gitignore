@@ -6,3 +6,4 @@ __pycache__/
 results/simulator/*.joblib
 .venv/
 .ipynb_checkpoints/
+data/db2/

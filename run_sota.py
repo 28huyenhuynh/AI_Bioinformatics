@@ -4,6 +4,8 @@
                        10 repetition splits, macro-average accuracy (Table VI).
     --paper hu         Attention-based hybrid CNN-RNN, Hu et al. (2018),
                        raw-image1 input, NinaPro split, window + trial accuracy (Table 4).
+    --paper jiang      RIE (Inception + efficient channel attention), Jiang et al. (2024),
+                       300 ms windows, NinaPro split, final- and best-epoch accuracy.
 
 Each finished (model, subject, split) is saved under <out>/folds/, so an
 interrupted run (e.g. a Colab disconnect) resumes where it stopped.
@@ -68,12 +70,21 @@ def run_fold(model, s, k, X, y, rep, train_reps, test_reps, lut, K, recipe, args
     if args.max_train_windows and len(tr_idx) > args.max_train_windows:
         tr_idx = np.sort(np.random.default_rng(args.seed).choice(tr_idx, args.max_train_windows, replace=False))
     scaler = deep.ChannelStandardizer(log=False).fit(X[tr_idx])
+    Xte, yte = scaler.transform(X[te]), lut[y[te]]
+    curve = []
+
+    def track(net):  # observe test accuracy per epoch; never used for training or selection
+        curve.append(float((deep.predict_proba(net, Xte).argmax(1) == yte).mean()))
+        return f"test {100 * curve[-1]:.1f}"
+
     t0 = time.time()
     net = sota.train(model, scaler.transform(X[tr_idx]), lut[y[tr_idx]], K, recipe,
-                     seed=args.seed, verbose=not args.quiet)
+                     seed=args.seed, verbose=not args.quiet,
+                     on_epoch=track if recipe.get("track_test") else None)
     fit_s = time.time() - t0
-    pred = deep.predict_proba(net, scaler.transform(X[te])).argmax(1)
-    res = sota.fold_result(lut[y[te]], rep[te], pred, K)
+    pred = deep.predict_proba(net, Xte).argmax(1)
+    res = sota.fold_result(yte, rep[te], pred, K)
+    res["epoch_acc"] = np.array(curve)
     np.savez(fold_path, model=model, subject=s, split=k, n_train=len(tr_idx), n_test=int(te.sum()),
              fit_seconds=fit_s, **res)
     m = sota.subject_metrics([res])
@@ -97,8 +108,9 @@ def aggregate(out, recipe, show=False):
     for model, d in df.groupby("model"):
         targets = recipe["targets"].get(model, {})
         lines.append(f"{model}  ({len(d)} subjects, {d['n_splits'].min()}-{d['n_splits'].max()} splits each)")
-        for metric in ("macro", "micro", "macro_no_rep1", "micro_no_rep1", "window_acc", "trial_acc"):
-            if metric not in targets and metric not in ("macro", "micro"):
+        for metric in ("macro", "micro", "macro_no_rep1", "micro_no_rep1", "window_acc", "best_epoch_acc",
+                       "trial_acc"):
+            if (metric not in targets and metric not in ("macro", "micro")) or metric not in d:
                 continue
             ours = f"{d[metric].mean():5.1f} ({d[metric].std(ddof=1) if len(d) > 1 else 0:4.1f})"
             tgt = targets.get(metric)

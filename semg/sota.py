@@ -50,6 +50,7 @@ RECIPES = {
         rest_mode="nearest",
         splits=HARTWELL_SPLITS,
         epochs=10, batch_size=32, optimizer="adam", lr=1e-3, weight_decay=0.0,
+        class_weights=True,                    # Eq. 6
         # Table VI, inter-subject mean (SD) in %
         targets={"TtS": {"macro": (66.6, 5.1), "micro": (77.5, 4.5),
                          "macro_no_rep1": (69.3, 5.4), "micro_no_rep1": (78.0, 4.6)},
@@ -66,6 +67,18 @@ RECIPES = {
         lr_steps=[16, 24], loss_alpha=1.0, loss_beta=1.0,
         # Table 4, "Attention-based hybrid CNN-RNN with raw-image1", NinaProDB1
         targets={"HuAttn": {"window_acc": (84.8, None), "trial_acc": (96.5, None)}},
+    ),
+    "jiang": dict(
+        models=["RIE"],
+        window=30, step=5,                     # 300 ms windows, 50 ms step
+        gestures=list(range(1, 53)),           # 52 movements, no rest
+        rest_mode="forward",
+        splits=[(C.TRAIN_REPS, C.TEST_REPS)],  # reps 2, 5, 7 held out (the paper's "validation set")
+        denoise="sym4",
+        epochs=150, batch_size=128, optimizer="adam", lr=1e-3, weight_decay=0.0, cosine=True,
+        track_test=True,                       # test accuracy after every epoch: final vs best epoch
+        # Table 3/4, RIE on NinaPro DB1 (52 gestures), mean over 27 subjects
+        targets={"RIE": {"window_acc": (88.27, None), "best_epoch_acc": (88.27, None)}},
     ),
 }
 
@@ -93,6 +106,17 @@ ASSUMPTIONS = {
         "Prediction uses the attention output; trial accuracy = majority vote over all test "
         "windows of one (gesture, repetition) trial.",
     ],
+    "jiang": [
+        "Symlet wavelet denoising: wavelet order, level and threshold not reported. sym4, "
+        "level 4, soft universal threshold (sigma from the finest detail level), per channel.",
+        "Z-score normalisation fitted on training repetitions only (paper: 'all sEMG data').",
+        "Cosine annealing minimum learning rate not reported: 0.",
+        "Dropout 0.5 'in the FC layer': placed between FC1 and FC2.",
+        "The 1x1 shortcut conv gets BN + ReLU like every other conv ('all convolutional layers, "
+        "except for the ECA block').",
+        "The paper scores reps 2, 5, 7 as a 'validation set' and does not say whether its 88.27% "
+        "is the final or the best epoch: both are reported (window_acc = final epoch).",
+    ],
 }
 
 
@@ -109,6 +133,24 @@ def _lowpass(sig, hz, order=1):
     return {**sig, "emg": emg.astype(np.float32)}
 
 
+def _wavelet_denoise(sig, wavelet="sym4", level=4):
+    """Soft universal-threshold wavelet denoising per channel and exercise
+    (Donoho & Johnstone), as a stand-in for Jiang et al.'s unspecified
+    'Symlets wavelet decomposition'."""
+    import pywt
+    emg = sig["emg"].copy()
+    for ex in np.unique(sig["exercise"]):
+        m = sig["exercise"] == ex
+        for c in range(emg.shape[1]):
+            x = emg[m, c].astype(np.float64)
+            coeffs = pywt.wavedec(x, wavelet, level=level)
+            sigma = np.median(np.abs(coeffs[-1])) / 0.6745
+            thr = sigma * np.sqrt(2 * np.log(len(x)))
+            coeffs[1:] = [pywt.threshold(d, thr, mode="soft") for d in coeffs[1:]]
+            emg[m, c] = pywt.waverec(coeffs, wavelet)[:len(x)]
+    return {**sig, "emg": emg.astype(np.float32)}
+
+
 def paper_windows(subject, recipe, lowpass_hz=None, data_dir=C.DATA_DIR):
     """All windows of one subject for a recipe (no rest down-sampling).
     Not cached: at a 1-sample step a subject is ~250 MB, and building the
@@ -117,6 +159,8 @@ def paper_windows(subject, recipe, lowpass_hz=None, data_dir=C.DATA_DIR):
     sig = load_subject(subject, data_dir, rest_mode=recipe["rest_mode"])
     if lowpass_hz:
         sig = _lowpass(sig, lowpass_hz)
+    if recipe.get("denoise"):
+        sig = _wavelet_denoise(sig, recipe["denoise"])
     X, y, r = make_windows(sig, recipe["window"], recipe["step"])
     keep = np.isin(y, recipe["gestures"]) & (r > 0)
     return X[keep], y[keep], r[keep]
@@ -236,13 +280,69 @@ if deep.TORCH_OK:
                 return out, self.fc(self.drop(h))              # (B, G), (B, T, G)
             return out
 
-    ARCHS = {"TtS": TtS, "BaselineCNN": BaselineCNN, "HuAttn": HuAttn}
+    def _cbr(cin, cout, k):
+        """Conv (stride 1, 'same' padding) + BatchNorm + ReLU."""
+        pad = (k[0] // 2, k[1] // 2) if isinstance(k, tuple) else k // 2
+        return nn.Sequential(nn.Conv2d(cin, cout, k, padding=pad), nn.BatchNorm2d(cout), nn.ReLU())
+
+    class ECA(nn.Module):
+        """Efficient channel attention: GAP -> 1D conv over channels (k=15) -> sigmoid."""
+
+        def __init__(self, k=15):
+            super().__init__()
+            self.conv = nn.Conv1d(1, 1, k, padding=k // 2, bias=False)
+
+        def forward(self, x):                                  # (B, C, H, W)
+            w = self.conv(x.mean((2, 3)).unsqueeze(1))         # (B, 1, C)
+            return x * torch.sigmoid(w).squeeze(1)[:, :, None, None]
+
+    class INECA(nn.Module):
+        """Jiang et al. Fig. 1: four Inception paths + 1x1 residual shortcut, then ECA."""
+
+        def __init__(self, cin, ch):
+            super().__init__()
+            c1, c2, c3, c4, c5, c6 = ch
+            self.p1 = _cbr(cin, c1, 1)
+            self.p2 = nn.Sequential(_cbr(cin, c2, 1), _cbr(c2, c3, 3))
+            self.p3 = nn.Sequential(_cbr(cin, c4, 1), _cbr(c4, c5, (5, 1)), _cbr(c5, c5, (1, 5)))
+            self.p4 = nn.Sequential(nn.AvgPool2d(3, stride=1, padding=1), _cbr(cin, c6, 1))
+            self.res = _cbr(cin, c1 + c3 + c5 + c6, 1)
+            self.eca = ECA(15)
+
+        def forward(self, x):
+            out = torch.cat([self.p1(x), self.p2(x), self.p3(x), self.p4(x)], dim=1)
+            return self.eca(out + self.res(x))
+
+    class RIE(nn.Module):
+        """Jiang et al. 2024 (Table 1): 4 IN-ECA blocks -> average pool to 2x2 -> FC 128 -> FC K.
+        Input image = time (30 rows) x channels (10 columns)."""
+
+        BLOCKS = [(16, 12, 32, 4, 8, 8), (32, 24, 64, 8, 16, 16),
+                  (64, 48, 128, 16, 32, 32), (128, 96, 256, 32, 64, 64)]
+
+        def __init__(self, n_channels, n_classes):
+            super().__init__()
+            layers, cin = [], 1
+            for ch in self.BLOCKS:
+                layers.append(INECA(cin, ch))
+                cin = ch[0] + ch[2] + ch[4] + ch[5]
+            self.features = nn.Sequential(*layers)
+            self.pool = nn.AdaptiveAvgPool2d((2, 2))           # "from 30 x 10 to 2 x 2"
+            self.head = nn.Sequential(nn.Flatten(), nn.Linear(cin * 4, 128), nn.ReLU(),
+                                      nn.Dropout(0.5), nn.Linear(128, n_classes))
+
+        def forward(self, x):                                  # (B, C, T)
+            return self.head(self.pool(self.features(x.transpose(1, 2).unsqueeze(1))))
+
+    ARCHS = {"TtS": TtS, "BaselineCNN": BaselineCNN, "HuAttn": HuAttn, "RIE": RIE}
 
 
 def make_net(name, n_classes, recipe):
     deep._require_torch()
     if name == "HuAttn":
         return HuAttn(C.N_CHANNELS, n_classes, recipe["window"], recipe["subsegments"])
+    if name == "RIE":
+        return RIE(C.N_CHANNELS, n_classes)
     return ARCHS[name](C.N_CHANNELS, n_classes, recipe["window"])
 
 
@@ -259,7 +359,9 @@ def hartwell_class_weights(y, n_classes):
     return (1 + np.log2(n.max() / np.maximum(n, 1))).astype(np.float32)
 
 
-def train(name, Xtr, ytr, n_classes, recipe, seed=C.SEED, verbose=True):
+def train(name, Xtr, ytr, n_classes, recipe, seed=C.SEED, verbose=True, on_epoch=None):
+    """on_epoch: optional callable(net) run after every epoch (e.g. test accuracy);
+    it only observes, training never sees its result."""
     deep.set_seed(seed)
     device = deep.get_device()
     net = make_net(name, n_classes, recipe).to(device)
@@ -269,11 +371,16 @@ def train(name, Xtr, ytr, n_classes, recipe, seed=C.SEED, verbose=True):
     else:
         opt = torch.optim.SGD(net.parameters(), lr=recipe["lr"], momentum=0.9,
                               weight_decay=recipe["weight_decay"])
-    sched = (torch.optim.lr_scheduler.MultiStepLR(opt, recipe["lr_steps"], 0.1)
-             if recipe.get("lr_steps") else None)
+    if recipe.get("lr_steps"):
+        sched = torch.optim.lr_scheduler.MultiStepLR(opt, recipe["lr_steps"], 0.1)
+    elif recipe.get("cosine"):
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=recipe["epochs"], eta_min=0.0)
+    else:
+        sched = None
 
     is_hu = name == "HuAttn"
-    cw = None if is_hu else torch.tensor(hartwell_class_weights(ytr, n_classes), device=device)
+    cw = (torch.tensor(hartwell_class_weights(ytr, n_classes), device=device)
+          if recipe.get("class_weights") else torch.ones(n_classes, device=device))
     ce = nn.CrossEntropyLoss(reduction="none")
 
     def loss_fn(xb, yb):
@@ -283,7 +390,8 @@ def train(name, Xtr, ytr, n_classes, recipe, seed=C.SEED, verbose=True):
             l_att = ce(out, yb).mean() / T
             l_tgt = ce(steps.reshape(-1, steps.shape[-1]), yb.repeat_interleave(T)).mean()
             return recipe["loss_alpha"] * l_att + recipe["loss_beta"] * l_tgt
-        # Keras class_weight: per-sample loss scaled by its class weight, averaged over the batch
+        # Keras class_weight style (Hartwell): per-sample loss scaled by its class weight,
+        # averaged over the batch; all weights 1 = plain cross-entropy
         return (ce(net(xb), yb) * cw[yb]).mean()
 
     # whole training set lives on the device: with batch 32 the per-batch
@@ -309,9 +417,12 @@ def train(name, Xtr, ytr, n_classes, recipe, seed=C.SEED, verbose=True):
             total += loss.detach() * len(idx)  # no .item(): avoids a GPU sync every batch
         if sched:
             sched.step()
+        extra = ""
+        if on_epoch is not None:
+            extra = f"  {on_epoch(net)}"
         if verbose:
             print(f"      epoch {epoch:>2}/{recipe['epochs']}  loss {float(total) / len(ytr):.4f}"
-                  f"  ({time.time() - t0:.0f}s)", flush=True)
+                  f"{extra}  ({time.time() - t0:.0f}s)", flush=True)
     return net
 
 
@@ -356,4 +467,7 @@ def subject_metrics(folds):
         out["macro" + suffix] = 100 * np.mean(tp[present] / n[present])
     out["window_acc"] = out["micro"]
     out["trial_acc"] = 100 * sum(f["trial_correct"] for f in folds) / max(sum(f["trial_total"] for f in folds), 1)
+    curves = [f["epoch_acc"] for f in folds if "epoch_acc" in f and len(f["epoch_acc"])]
+    if curves:  # test accuracy after every epoch: the best one is what test-set model selection would report
+        out["best_epoch_acc"] = 100 * float(np.mean([c.max() for c in curves]))
     return out

@@ -89,6 +89,8 @@ def test_sota_param_counts_match_hartwell_tables():
     rec = sota.RECIPES["hartwell"]
     assert sota.n_params(sota.make_net("TtS", 53, rec)) == 754_933          # Table I
     assert sota.n_params(sota.make_net("BaselineCNN", 53, rec)) == 776_341  # Table III
+    # Jiang et al. 2024 report 0.89 M parameters for RIE
+    assert round(sota.n_params(sota.make_net("RIE", 52, sota.RECIPES["jiang"])) / 1e6, 2) == 0.89
 
 
 def test_forman_pooling_and_trial_vote():
